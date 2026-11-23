@@ -3,12 +3,14 @@
 Play Sharp X68000 MDX music on the CardputerZero. The player includes a note
 spectrum, FM and PCM part meters, a library browser, favorites, and automatic
 audio routing for the built-in speaker and wired headphones.
+It uses the playback core from the FM-1 MDX player, with RetroFM sequencing,
+PDX sample mixing, and software YM2151 synthesis at 44.1 kHz stereo.
 
 ## Install and play
 
 1. Download the Arm64 Debian package from the release and copy it to your
    CardputerZero.
-2. Run `sudo apt install ./cardputer-mdx_0.1.0-1_arm64.deb` on the device.
+2. Run `sudo apt install ./cardputer-mdx_0.2.0-1_arm64.deb` on the device.
 3. Put your MDX files in `~/Music/MDX Library`. You can organize them in
    subfolders. Keep each PDX sample bank in the same folder as the tracks
    that use it.
@@ -45,19 +47,23 @@ sudo apt install build-essential binutils dpkg
 sh ./build-deb.sh
 ```
 
-The package is written to `dist/cardputer-mdx_0.1.0-1_arm64.deb`. Pass a
+The package is written to `dist/cardputer-mdx_0.2.0-1_arm64.deb`. Pass a
 directory as the first argument to change the output location. Set
 `SOURCE_DATE_EPOCH` to the release commit timestamp to fix package timestamps.
 The build uses only the source in this tree and the installed system tools.
 
 APPLaunch uses the included desktop entry and icon. The player, display module,
 and decoder are installed together under `/usr/lib/cardputer-mdx/`.
+With the package installed, run the compatibility tests using
+`python3 tests/check_compatibility.py /usr/lib/cardputer-mdx/mdx-render`.
 
 ## Source and license
 
-The application and the FM-1 meter code use GPL-3.0-or-later. The decoder
-statically links [mdxmini](https://github.com/mistydemeo/mdxmini) at
-`003531a471c1955f4ed4357d0e2a6cba809c34a0`, distributed by its authors under
-GPL-2.0-or-later. The [license](LICENSE), [packaging notices](packaging/copyright),
-[mdxmini authors](vendor/mdxmini/AUTHORS), and [mdxmini license](vendor/mdxmini/COPYING)
-are included with the corresponding source.
+The player and [FM-1 playback core](https://github.com/Keitark/fm1-mdx) use
+GPL-3.0-or-later. The FM-1 core uses RetroFM at
+`3aad4b3d893dcb11cf6318bd8fee18c9022eccd5` and an adapted FM driver and
+YM2151 emulator from [mdxtools](https://github.com/vampirefrog/mdxtools) at
+`606e3a7009aa1a9dfa6bee8bc875dbd5483714e9`. The CardputerZero build includes
+compatibility changes to RetroFM for MDX files in existing libraries. The
+[license](LICENSE) and [packaging notices](packaging/copyright) accompany the
+corresponding source.

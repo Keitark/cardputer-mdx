@@ -8,13 +8,27 @@ License: GPL-3.0-or-later
  See LICENSE in the source tree or /usr/share/doc/cardputer-mdx/LICENSE
  in the installed package for the complete license.
 
-Files: vendor/fm1-meters/*
+Files: vendor/fm1-mdx/* vendor/fm1-meters/*
 Copyright: FM-1 MDX contributors
 License: GPL-3.0-or-later
- The spectrum and part envelope code comes from the FM-1 MDX project.
+ The playback core, PCM mixing and meters are from the FM-1 MDX player
+ (https://github.com/Keitark/fm1-mdx, revision
+ 39b9ae923ae16a60212ced2d05b7593b21bc5198).
 
-Files: vendor/mdxmini/*
-Copyright: The mdxmini, mdxplay and MAME YM2151 contributors
-License: GPL-2.0-or-later
- See vendor/mdxmini/AUTHORS and vendor/mdxmini/COPYING in the source tree,
- or the mdxmini-AUTHORS and mdxmini-COPYING files in the installed package.
+Files: vendor/retrofm/*
+Copyright: RetroFM contributors
+License: GPL-3.0-or-later
+ The FM-1 copy comes from RetroFM revision
+ 3aad4b3d893dcb11cf6318bd8fee18c9022eccd5, with CardputerZero
+ compatibility changes tracked in this repository. See
+ vendor/retrofm/COPYING and vendor/retrofm/MDX_PORT_NOTES.md,
+ or the installed retrofm-COPYING.
+
+Files: vendor/mdxtools/*
+Copyright: mdxtools contributors, Jarek Burczynski, Tatsuyuki Satoh,
+ and FM-1 MDX contributors
+License: GPL-3.0-or-later
+ From https://github.com/vampirefrog/mdxtools at revision
+ 606e3a7009aa1a9dfa6bee8bc875dbd5483714e9, including FM-1 adaptations.
+ See original source notices and vendor/mdxtools/LICENSE,
+ or the mdxtools-LICENSE file in the installed package.

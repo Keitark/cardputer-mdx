@@ -1,10 +1,12 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-/* Connect the mdxmini audio driver to the FM-1 MDX display envelopes. */
+/* Send FM-1 MDX playback and meter events to the CardputerZero player. */
 
 #define _GNU_SOURCE
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <iconv.h>
+#include <inttypes.h>
 #include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -14,169 +16,254 @@
 #include <strings.h>
 #include <unistd.h>
 
-#include "mdxmini.h"
-#include "fm1_meters.h"
+#include "fm1_mdx.h"
 
-enum { RATE = 44100, FRAMES = 1024, STEREO = 2 };
+enum {
+    FRAMES = 1024,
+    STEREO = 2,
+    PLAYBACK_LOOPS = 2,
+    LOOP_FADE_RATE = 16,
+    DURATION_LIMIT_SECONDS = 20 * 60,
+};
 
-static MDX_DATA *meter_song;
-static fm1_meters meters;
-static fm1_note_motion spectrum[FM1_NOTE_BARS];
-static fm1_part_motion parts[MDX_MAX_TRACK_NUMBER];
-static unsigned char key_code[8];
-static unsigned char onset[MDX_MAX_TRACK_NUMBER];
-static unsigned int held, seen, triggered;
+struct file_bytes {
+    uint8_t *data;
+    size_t size;
+};
 
-static unsigned int velocity(unsigned int part)
+struct display_meters {
+    fm1_note_motion spectrum[FM1_NOTE_BARS];
+    fm1_part_motion parts[RETROFM_MDX_MAX_TRACKS];
+};
+
+static const uint8_t empty_bank[RETROFM_PDX_TABLE_BYTES] = {0};
+
+static bool read_file(FILE *stream, struct file_bytes *bytes)
 {
-    int volume = meter_song->track[part].volume;
-    return volume < 0 ? 0 : volume > 127 ? 127 : (unsigned int)volume;
-}
-
-static unsigned char configured_level(unsigned int level)
-{
-    unsigned int step = level >> 2;
-    return step > 4 ? (step - 4) * 255 / 28 : 0;
-}
-
-static void record_onset(unsigned int part, unsigned int midi)
-{
-    unsigned int level = velocity(part);
-    unsigned int bit = 1u << part;
-    seen |= bit;
-    held |= bit;
-    triggered |= bit;
-    onset[part] = configured_level(level);
-    fm1_meters_note(&meters, midi, level);
-}
-
-void __real_YM2151WriteReg(void *chip, int reg, int value);
-void __wrap_YM2151WriteReg(void *chip, int reg, int value)
-{
-    __real_YM2151WriteReg(chip, reg, value);
-    if (!meter_song) {
-        return;
+    if (fseek(stream, 0, SEEK_END) != 0) {
+        return false;
     }
-    if (reg >= 0x28 && reg <= 0x2f) {
-        key_code[reg - 0x28] = value & 0x7f;
-    } else if (reg == 8) {
-        static const unsigned char semitone[] = {0,1,2,2,3,4,5,5,6,7,8,8,9,10,11,11};
-        unsigned int part = value & 7;
-        if (value & 0x78) {
-            unsigned int pitch = key_code[part];
-            record_onset(part, 13 + (pitch >> 4) * 12 + semitone[pitch & 15]);
-        } else {
-            held &= ~(1u << part);
+    long size = ftell(stream);
+    if (size <= 0 || fseek(stream, 0, SEEK_SET) != 0) {
+        return false;
+    }
+    uint8_t *data = malloc((size_t)size);
+    if (!data) {
+        return false;
+    }
+    if (fread(data, 1, (size_t)size, stream) != (size_t)size) {
+        free(data);
+        return false;
+    }
+    bytes->data = data;
+    bytes->size = (size_t)size;
+    return true;
+}
+
+static FILE *open_adjacent_bank(DIR *directory, const char *reference)
+{
+    const char *slash = strrchr(reference, '/');
+    const char *name = slash ? slash + 1 : reference;
+    const char *backslash = strrchr(name, '\\');
+    if (backslash) {
+        name = backslash + 1;
+    }
+    size_t length = strlen(name);
+    const char *suffix =
+        length >= 4 && strcasecmp(name + length - 4, ".pdx") == 0 ? "" : ".pdx";
+    char filename[NAME_MAX + 1];
+    int count = snprintf(filename, sizeof filename, "%s%s", name, suffix);
+    if (!length || count < 0 || (size_t)count >= sizeof filename) {
+        return NULL;
+    }
+
+    int directory_fd = dirfd(directory);
+    int fd = openat(directory_fd, filename, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd < 0) {
+        struct dirent *entry;
+        rewinddir(directory);
+        while ((entry = readdir(directory))) {
+            if (strcasecmp(entry->d_name, filename) == 0) {
+                fd = openat(directory_fd, entry->d_name, O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+                if (fd >= 0) {
+                    break;
+                }
+            }
         }
     }
+    if (fd < 0) {
+        return NULL;
+    }
+
+    FILE *stream = fdopen(fd, "rb");
+    if (!stream) {
+        close(fd);
+    }
+    return stream;
 }
 
-int __real_pcm8_note_on(int, int *, int, int *, int, songdata *);
-int __wrap_pcm8_note_on(int channel, int *pcm, int count, int *original, int size, songdata *data)
+static FILE *open_pdx(const char *mdx_path, const retrofm_mdx_span *name)
 {
-    int result = __real_pcm8_note_on(channel, pcm, count, original, size, data);
-    if (!result && meter_song && channel >= 0 && channel < 8 && (count > 0 || size > 0)) {
-        unsigned int part = channel + 8;
-        if (!(held & (1u << part))) {
-            int note = meter_song->track[part].note;
-            record_onset(part, note >= 0 ? note + 13 : 13);
+    if (!name->size) {
+        return NULL;
+    }
+    const char *slash = strrchr(mdx_path, '/');
+    char *path = slash ? strndup(mdx_path, (size_t)(slash - mdx_path + 1)) : strdup(".");
+    if (!path) {
+        return NULL;
+    }
+    DIR *directory = opendir(path);
+    free(path);
+    if (!directory) {
+        return NULL;
+    }
+
+    /* Decode before splitting DOS paths since 0x5c can be a CP932 trail byte. */
+    iconv_t conversion = iconv_open("UTF-8", "CP932");
+    FILE *stream = NULL;
+    if (conversion != (iconv_t)-1) {
+        char decoded[PATH_MAX];
+        char *input = (char *)name->data;
+        char *output = decoded;
+        size_t in_left = name->size;
+        size_t out_left = sizeof decoded - 1;
+        if (iconv(conversion, &input, &in_left, &output, &out_left) != (size_t)-1) {
+            *output = '\0';
+            stream = open_adjacent_bank(directory, decoded);
         }
+        iconv_close(conversion);
+    }
+    if (!stream) {
+        /* Some Linux collections store UTF-8 names directly in MDX headers. */
+        stream = open_adjacent_bank(directory, (const char *)name->data);
+    }
+    closedir(directory);
+    return stream;
+}
+
+static bool read_track(const char *path, struct file_bytes *mdx)
+{
+    FILE *stream = fopen(path, "rb");
+    if (!stream) {
+        fprintf(stderr, "ERROR Could not open MDX track\n");
+        return false;
+    }
+    bool loaded = read_file(stream, mdx);
+    fclose(stream);
+    if (!loaded) {
+        fprintf(stderr, "ERROR Could not read MDX track\n");
+    }
+    return loaded;
+}
+
+static retrofm_mdx_result load_song(fm1_mdx_player *player, const char *path,
+                                    const struct file_bytes *mdx, struct file_bytes *pdx,
+                                    bool *has_pdx)
+{
+    retrofm_mdx header;
+    retrofm_mdx_result result = retrofm_mdx_open(&header, mdx->data, mdx->size);
+    if (result != RETROFM_MDX_OK) {
+        return result;
+    }
+    if (header.uses_pdx) {
+        FILE *stream = open_pdx(path, &header.pdx_name);
+        if (stream) {
+            (void)read_file(stream, pdx);
+            fclose(stream);
+        }
+    }
+
+    result = (retrofm_mdx_result)fm1_mdx_load(player, mdx->data, mdx->size, pdx->data, pdx->size);
+    *has_pdx = header.uses_pdx && result == RETROFM_MDX_OK;
+    if (result == RETROFM_MDX_MISSING_PDX) {
+        /* Keep the PCM parts on the sequencer's timeline when the bank is unavailable. */
+        result = (retrofm_mdx_result)fm1_mdx_load(player, mdx->data, mdx->size,
+                                                  empty_bank, sizeof empty_bank);
     }
     return result;
 }
 
-int __real_pcm8_note_off(int, songdata *);
-int __wrap_pcm8_note_off(int channel, songdata *data)
+static retrofm_mdx_result reload_song(fm1_mdx_player *player, const struct file_bytes *mdx,
+                                      const struct file_bytes *pdx, bool has_pdx)
 {
-    if (channel >= 0 && channel < 8) {
-        held &= ~(1u << (channel + 8));
-    }
-    return __real_pcm8_note_off(channel, data);
+    return (retrofm_mdx_result)fm1_mdx_load(player, mdx->data, mdx->size,
+                                           has_pdx ? pdx->data : empty_bank,
+                                           has_pdx ? pdx->size : sizeof empty_bank);
 }
 
-static void advance_meters(unsigned int elapsed_ms, unsigned int step_ms, int tracks)
+static void print_title(const retrofm_mdx_span *title)
 {
-    unsigned char volume[MDX_MAX_TRACK_NUMBER] = {0};
-    if (tracks > MDX_MAX_TRACK_NUMBER) {
-        tracks = MDX_MAX_TRACK_NUMBER;
-    }
-    for (unsigned int i = 0; i < FM1_NOTE_BARS; ++i) {
-        fm1_note_step(&spectrum[i], meters.note_energy[i], step_ms);
-        meters.note_energy[i] = 0;
-    }
-    for (int i = 0; i < tracks; ++i) {
-        unsigned int bit = 1u << i;
-        volume[i] = seen & bit ? configured_level(velocity(i)) : 0;
-        fm1_part_step(&parts[i], triggered & bit, onset[i], volume[i], held & bit, step_ms);
-    }
-    triggered = 0;
-
-    fprintf(stderr, "METER %u", elapsed_ms);
-    for (unsigned int i = 0; i < FM1_NOTE_BARS; ++i) {
-        fprintf(stderr, " %u %u", spectrum[i].step, spectrum[i].peak);
-    }
-    for (int i = 0; i < MDX_MAX_TRACK_NUMBER; ++i) {
-        fprintf(stderr, " %u %u", parts[i].step, (volume[i] * 28u + 254u) / 255u);
+    fputs("TITLE ", stderr);
+    for (size_t i = 0; i < title->size && i < 1024; ++i) {
+        uint8_t character = title->data[i];
+        fputc(character == '\r' || character == '\n' || !character ? ' ' : character, stderr);
     }
     fputc('\n', stderr);
 }
 
-FILE *__real_fopen(const char *path, const char *mode);
-
-/* X68000 PDX references are case-insensitive. Linux filenames can be mixed case. */
-FILE *__wrap_fopen(const char *path, const char *mode)
+static void advance_meters(fm1_mdx_player *player, struct display_meters *meters,
+                           uint64_t elapsed_ms, uint32_t step_ms)
 {
-    FILE *file = __real_fopen(path, mode);
-    const char *extension = strrchr(path, '.');
-    if (file || !extension || strcasecmp(extension, ".pdx") || strcmp(mode, "rb")) {
-        return file;
-    }
+    uint8_t volume[RETROFM_MDX_MAX_TRACKS];
+    uint8_t onset[RETROFM_MDX_MAX_TRACKS];
+    uint16_t held;
+    uint16_t triggered = fm1_mdx_part_activity(player, volume, onset, &held);
 
-    const char *slash = strrchr(path, '/');
-    const char *name = slash ? slash + 1 : path;
-    char directory[PATH_MAX] = ".";
-    if (slash) {
-        size_t length = slash - path + 1;
-        if (length >= sizeof directory) {
-            return NULL;
-        }
-        memcpy(directory, path, length);
-        directory[length] = '\0';
+    fprintf(stderr, "METER %" PRIu64, elapsed_ms);
+    for (size_t i = 0; i < FM1_NOTE_BARS; ++i) {
+        fm1_note_step(&meters->spectrum[i], player->meters.note_energy[i], step_ms);
+        player->meters.note_energy[i] = 0;
+        fprintf(stderr, " %u %u", meters->spectrum[i].step, meters->spectrum[i].peak);
     }
-    DIR *entries = opendir(directory);
-    if (!entries) {
-        return NULL;
+    for (size_t i = 0; i < RETROFM_MDX_MAX_TRACKS; ++i) {
+        unsigned int bit = 1u << i;
+        fm1_part_step(&meters->parts[i], triggered & bit, onset[i], volume[i], held & bit, step_ms);
+        fprintf(stderr, " %u %u", meters->parts[i].step, (volume[i] * 28u + 254u) / 255u);
     }
-    struct dirent *entry;
-    while ((entry = readdir(entries)) != NULL) {
-        if (!strcasecmp(entry->d_name, name)) {
-            char candidate[PATH_MAX];
-            int length = snprintf(candidate, sizeof candidate, "%s/%s", directory, entry->d_name);
-            if (length >= 0 && (size_t)length < sizeof candidate) {
-                file = __real_fopen(candidate, mode);
-            }
-            break;
-        }
-    }
-    closedir(entries);
-    return file;
+    fputc('\n', stderr);
 }
 
-/* Count the same padded blocks as playback without rendering the PCM. */
-static int print_duration(t_mdxmini *song)
+static retrofm_mdx_result fade_after_loops(retrofm_mdx_sequencer *sequence)
 {
-    const uint64_t limit = 20u * 60u * RATE / FRAMES;
-    uint64_t blocks = 0;
-    int more;
-    do {
-        more = mdx_calc_log(song, NULL, FRAMES);
-        ++blocks;
-    } while (more && blocks < limit);
-    if (more) {
-        return 1;
+    if (sequence->ended || sequence->fade_rate != 0) {
+        return RETROFM_MDX_OK;
     }
-    printf("%llu\n", (unsigned long long)(blocks * FRAMES * 1000u / RATE));
-    return 0;
+    for (size_t i = 0; i < sequence->mdx->track_count; ++i) {
+        const retrofm_mdx_track_state *track = &sequence->tracks[i];
+        if (track->used && !track->ended && track->loop_count < PLAYBACK_LOOPS) {
+            return RETROFM_MDX_OK;
+        }
+    }
+    return retrofm_mdx_sequencer_start_fade(sequence, LOOP_FADE_RATE);
+}
+
+/* First DAC sample at or after the timer boundary. */
+static uint64_t sample_at_cycle(uint64_t cycles)
+{
+    return cycles / RETROFM_PL_CLOCK_HZ * FM1_MDX_RATE +
+        (cycles % RETROFM_PL_CLOCK_HZ * FM1_MDX_RATE + RETROFM_PL_CLOCK_HZ - 1) /
+        RETROFM_PL_CLOCK_HZ;
+}
+
+/* Scan the sequence before writing PCM to detect unsupported commands early. */
+static retrofm_mdx_result scan_song(fm1_mdx_player *player, uint64_t *duration_ms)
+{
+    retrofm_mdx_sequencer *sequence = &player->sequence;
+    const uint64_t limit = (uint64_t)DURATION_LIMIT_SECONDS * RETROFM_PL_CLOCK_HZ;
+    while (!sequence->ended && sequence->current_cycles < limit) {
+        retrofm_mdx_result result = retrofm_mdx_sequencer_tick(sequence);
+        if (result == RETROFM_MDX_OK) {
+            result = fade_after_loops(sequence);
+        }
+        if (result != RETROFM_MDX_OK) {
+            return result;
+        }
+    }
+    if (sequence->ended) {
+        uint64_t blocks = sample_at_cycle(sequence->current_cycles) / FRAMES + 1;
+        *duration_ms = blocks * FRAMES * 1000u / FM1_MDX_RATE;
+    }
+    return RETROFM_MDX_OK;
 }
 
 static void update_mix_mode(int *fd, bool *mono)
@@ -202,9 +289,76 @@ static void update_mix_mode(int *fd, bool *mono)
     }
 }
 
+static retrofm_mdx_result render_block(fm1_mdx_player *player, int16_t *samples, uint64_t written)
+{
+    retrofm_mdx_sequencer *sequence = &player->sequence;
+    for (size_t offset = 0; offset < FRAMES;) {
+        size_t count = FRAMES - offset;
+        if (count > FM1_MDX_BLOCK) {
+            count = FM1_MDX_BLOCK;
+        }
+        if (player->playing) {
+            uint64_t tick = sample_at_cycle(sequence->current_cycles + sequence->cycles_per_tick);
+            uint64_t through_tick = tick > written + offset ? tick - written - offset + 1 : 1;
+            if (count > through_tick) {
+                count = (size_t)through_tick;
+            }
+        }
+        retrofm_mdx_result result =
+            (retrofm_mdx_result)fm1_mdx_render(player, samples + offset * STEREO, count);
+        if (result == RETROFM_MDX_OK) {
+            result = fade_after_loops(sequence);
+        }
+        if (result != RETROFM_MDX_OK) {
+            return result;
+        }
+        offset += count;
+    }
+    return RETROFM_MDX_OK;
+}
+
+static int render(fm1_mdx_player *player, int mix_fd)
+{
+    /* The meter clock follows the PCM stream and stays close to audible playback. */
+    (void)fcntl(STDOUT_FILENO, F_SETPIPE_SZ, 4096);
+    struct display_meters meters = {0};
+    int16_t samples[FRAMES * STEREO];
+    uint64_t written = 0;
+    uint64_t elapsed_ms = 0;
+    bool mono = false;
+    int status = 0;
+    do {
+        retrofm_mdx_result result = render_block(player, samples, written);
+        if (result != RETROFM_MDX_OK) {
+            fprintf(stderr, "ERROR %s\n", retrofm_mdx_result_string(result));
+            status = 1;
+            break;
+        }
+        update_mix_mode(&mix_fd, &mono);
+        if (mono) {
+            for (size_t i = 0; i < FRAMES * STEREO; i += STEREO) {
+                int16_t mixed = ((int32_t)samples[i] + samples[i + 1]) / 2;
+                samples[i] = samples[i + 1] = mixed;
+            }
+        }
+        if (fwrite(samples, sizeof samples[0] * STEREO, FRAMES, stdout) != FRAMES) {
+            status = 1;
+            break;
+        }
+        written += FRAMES;
+        uint64_t audio_ms = written * 1000u / FM1_MDX_RATE;
+        advance_meters(player, &meters, audio_ms, (uint32_t)(audio_ms - elapsed_ms));
+        elapsed_ms = audio_ms;
+    } while (player->playing);
+    if (mix_fd >= 0) {
+        close(mix_fd);
+    }
+    return status;
+}
+
 int main(int argc, char **argv)
 {
-    int duration_only = argc == 3 && !strcmp(argv[1], "--duration");
+    bool duration_only = argc == 3 && !strcmp(argv[1], "--duration");
     int mix_fd = -1;
     if (argc == 4 && !strcmp(argv[1], "--mix-fd")) {
         char *end;
@@ -226,62 +380,41 @@ int main(int argc, char **argv)
         return 2;
     }
 
-    t_mdxmini song = {0};
-    mdx_set_rate(RATE);
-    if (mdx_open(&song, argv[argc - 1], NULL) != 0) {
-        fprintf(stderr, "ERROR Could not open MDX track\n");
-        return 1;
-    }
-    if (song.channels != STEREO) {
-        fprintf(stderr, "ERROR Unsupported audio channel count\n");
-        mdx_close(&song);
+    struct file_bytes mdx = {0};
+    if (!read_track(argv[argc - 1], &mdx)) {
         return 1;
     }
 
-    mdx_set_max_loop(&song, 2);
-    if (duration_only) {
-        int result = print_duration(&song);
-        mdx_close(&song);
-        return result;
+    fm1_mdx_player player;
+    struct file_bytes pdx = {0};
+    bool has_pdx = false;
+    uint64_t duration_ms = 0;
+    retrofm_mdx_result result = load_song(&player, argv[argc - 1], &mdx, &pdx, &has_pdx);
+    if (result == RETROFM_MDX_OK) {
+        result = scan_song(&player, &duration_ms);
     }
-    char title[MDX_MAX_TITLE_LENGTH + 1] = {0};
-    mdx_get_title(&song, title);
-    title[MDX_MAX_TITLE_LENGTH] = '\0';
-    for (char *character = title; *character; ++character) {
-        if (*character == '\r' || *character == '\n') {
-            *character = ' ';
-        }
+    if (result == RETROFM_MDX_OK && !duration_only) {
+        result = reload_song(&player, &mdx, &pdx, has_pdx);
     }
-    fprintf(stderr, "TITLE %s\n", title);
-    fprintf(stderr, "ENGINE %s\n", song.pdx ? "FM + PCM" : "FM");
 
-    meter_song = song.mdx;
-    /* Keep the display close to the audio clock when stdout is a pipe. */
-    (void)fcntl(STDOUT_FILENO, F_SETPIPE_SZ, 4096);
-    const int tracks = mdx_get_tracks(&song);
-    short samples[FRAMES * STEREO];
-    uint64_t written_frames = 0;
-    unsigned int elapsed_ms = 0;
-    bool mono = false;
-    int more;
-    do {
-        more = mdx_calc_sample(&song, samples, FRAMES);
-        update_mix_mode(&mix_fd, &mono);
-        if (mono) {
-            for (int i = 0; i < FRAMES * STEREO; i += STEREO) {
-                short mixed = ((int32_t)samples[i] + samples[i + 1]) / 2;
-                samples[i] = samples[i + 1] = mixed;
+    int status = 1;
+    if (result == RETROFM_MDX_OK) {
+        fprintf(stderr, "DECODER RETROFM\n");
+        if (duration_only) {
+            if (duration_ms) {
+                printf("%" PRIu64 "\n", duration_ms);
+                status = 0;
             }
+        } else {
+            print_title(&player.mdx.title);
+            fprintf(stderr, "ENGINE %s\n", has_pdx ? "FM + PCM" : "FM");
+            status = render(&player, mix_fd);
         }
-        if (fwrite(samples, sizeof(short) * STEREO, FRAMES, stdout) != FRAMES) {
-            break;
-        }
-        written_frames += FRAMES;
-        unsigned int audio_ms = written_frames * 1000u / RATE;
-        advance_meters(audio_ms, audio_ms - elapsed_ms, tracks);
-        elapsed_ms = audio_ms;
-    } while (more);
-    meter_song = NULL;
-    mdx_close(&song);
-    return 0;
+    }
+    free(pdx.data);
+    free(mdx.data);
+    if (result != RETROFM_MDX_OK) {
+        fprintf(stderr, "ERROR %s\n", retrofm_mdx_result_string(result));
+    }
+    return status;
 }

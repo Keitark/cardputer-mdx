@@ -5,7 +5,7 @@ umask 022
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 destination=${1:-"$root/dist"}
 package=cardputer-mdx
-version=0.1.0-1
+version=0.2.0-1
 maintainer='Keitark <33802890+Keitark@users.noreply.github.com>'
 
 if [ "$(dpkg --print-architecture)" != arm64 ]; then
@@ -24,11 +24,6 @@ temporary=$(mktemp -d "$temp_root/cardputer-mdx.XXXXXXXX")
 trap 'rm -rf -- "$temporary"' EXIT
 trap 'exit 1' HUP INT TERM
 
-build="$temporary/mdxmini"
-mkdir -p "$build/obj"
-cp -R "$root/vendor/mdxmini/." "$build/"
-make -C "$build" -f Makefile.lib
-
 stage="$temporary/package"
 app="$stage/usr/lib/$package"
 launcher="$stage/usr/share/APPLaunch"
@@ -36,10 +31,15 @@ doc="$stage/usr/share/doc/$package"
 mkdir -p "$app" "$launcher/applications" "$launcher/share/images" "$doc" "$stage/DEBIAN"
 
 meters="$root/vendor/fm1-meters"
-gcc -O2 -c "$meters/fm1_meters.c" -o "$temporary/fm1_meters.o"
-gcc -O2 -Wall -Wextra -Werror -I"$build/src" -I"$meters" \
-    "$root/mdx-render.c" "$temporary/fm1_meters.o" "$build/obj/libmdxmini.a" \
-    -Wl,--wrap=YM2151WriteReg,--wrap=pcm8_note_on,--wrap=pcm8_note_off,--wrap=fopen \
+player="$root/vendor/fm1-mdx"
+retrofm="$root/vendor/retrofm"
+mdxtools="$root/vendor/mdxtools"
+gcc -std=c11 -O2 -c "$meters/fm1_meters.c" -o "$temporary/fm1_meters.o"
+gcc -std=c11 -O2 -Wall -Wextra -Werror -I"$player" -I"$meters" -I"$retrofm" -I"$mdxtools" \
+    -c "$root/mdx-render.c" -o "$temporary/mdx-render.o"
+gcc -std=c11 -O2 -I"$player" -I"$meters" -I"$retrofm" -I"$mdxtools" \
+    "$temporary/mdx-render.o" "$player/fm1_mdx.c" "$player/fm1_mdx_mix.c" "$temporary/fm1_meters.o" \
+    "$retrofm"/*.c "$mdxtools"/*.c \
     -lm -o "$app/mdx-render"
 strip --strip-unneeded "$app/mdx-render"
 
@@ -48,8 +48,8 @@ install -m 644 "$root/cardputer_display.py" "$app/"
 install -m 644 "$root/packaging/$package.desktop" "$launcher/applications/"
 install -m 644 "$root/packaging/$package.png" "$launcher/share/images/"
 install -m 644 "$root/README.md" "$root/LICENSE" "$root/packaging/copyright" "$doc/"
-install -m 644 "$build/AUTHORS" "$doc/mdxmini-AUTHORS"
-install -m 644 "$build/COPYING" "$doc/mdxmini-COPYING"
+install -m 644 "$retrofm/COPYING" "$doc/retrofm-COPYING"
+install -m 644 "$mdxtools/LICENSE" "$doc/mdxtools-LICENSE"
 
 libc_version=$(objdump -T "$app/mdx-render" |
     sed -nE 's/.*GLIBC_([0-9.]+).*/\1/p' | sort -Vu | tail -n 1)
