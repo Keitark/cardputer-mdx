@@ -1,0 +1,20 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: CardputerZero MDX Player
+Source: https://github.com/Keitark/cardputer-mdx
+
+Files: *
+Copyright: CardputerZero MDX Player contributors
+License: GPL-3.0-or-later
+ See LICENSE in the source tree or /usr/share/doc/cardputer-mdx/LICENSE
+ in the installed package for the complete license.
+
+Files: vendor/fm1-meters/*
+Copyright: FM-1 MDX contributors
+License: GPL-3.0-or-later
+ The spectrum and part envelope code comes from the FM-1 MDX project.
+
+Files: vendor/mdxmini/*
+Copyright: The mdxmini, mdxplay and MAME YM2151 contributors
+License: GPL-2.0-or-later
+ See vendor/mdxmini/AUTHORS and vendor/mdxmini/COPYING in the source tree,
+ or the mdxmini-AUTHORS and mdxmini-COPYING files in the installed package.

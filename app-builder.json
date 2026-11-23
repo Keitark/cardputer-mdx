@@ -1,0 +1,40 @@
+{
+  "package_name": "cardputer-mdx",
+  "version": "0.1.0-1",
+  "app_name": "MDX Player for CardputerZero",
+  "bin_name": "mdx-player.py",
+  "description": "Play Sharp X68000 MDX music on CardputerZero.",
+  "store": {
+    "summary": "Play Sharp X68000 MDX music with live FM and PCM meters.",
+    "description": "Play MDX music from your local library, with PDX sample support, a note spectrum, and individual FM and PCM meters. Browse folders, save favorites, and choose repeat or continuous playback. Auto audio mode mixes both channels for the built-in speaker and switches to stereo when headphones are connected. Press M to select Auto, Mono, or Stereo. Copy your MDX files and any matching PDX banks to Music/MDX Library in your home folder.",
+    "categories": ["Media"],
+    "screenshots": ["screenshots/player.png", "screenshots/filer.png"],
+    "icon": "packaging/icon.png",
+    "license": "GPL-3.0-or-later",
+    "source_repo": "https://github.com/Keitark/cardputer-mdx",
+    "author": {
+      "display_name": "Keitark",
+      "github": "Keitark"
+    },
+    "locales": {
+      "ja": {
+        "title": "CardputerZero用 MDXプレーヤー",
+        "summary": "X68000のMDX音楽を、FM・PCMメーターの表示付きで再生できます。"
+      },
+      "zh-CN": {
+        "title": "CardputerZero MDX 播放器",
+        "summary": "播放 Sharp X68000 的 MDX 音乐，实时显示 FM 和 PCM 音量。"
+      }
+    },
+    "share_code": "CZMX",
+    "permissions": {
+      "camera": false,
+      "microphone": false,
+      "imu": false,
+      "network": false,
+      "additional_hardware": false,
+      "background_service": false,
+      "external_display": false
+    }
+  }
+}

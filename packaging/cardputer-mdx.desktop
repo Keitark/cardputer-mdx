@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=MDX Player
+Type=Application
+Comment=Play X68000 MDX and PDX music
+Exec=/usr/lib/cardputer-mdx/mdx-player.py
+Icon=/usr/share/APPLaunch/share/images/cardputer-mdx.png
+Terminal=false
+Categories=Audio;AudioVideo;Player;
+Sysplause=true
