@@ -10,7 +10,7 @@ PDX sample mixing, and software YM2151 synthesis at 44.1 kHz stereo.
 
 1. Download the Arm64 Debian package from the release and copy it to your
    CardputerZero.
-2. Run `sudo apt install ./cardputer-mdx_0.2.0-1_arm64.deb` on the device.
+2. Run `sudo apt install ./cardputer-mdx_0.2.1-1_arm64.deb` on the device.
 3. Put your MDX files in `~/Music/MDX Library`. You can organize them in
    subfolders. Keep each PDX sample bank in the same folder as the tracks
    that use it.
@@ -32,8 +32,9 @@ needs administrator access. Playback runs as the signed-in device user.
 | B / V | Open favorites or toggle a favorite |
 | Hold Esc for 1 second | Exit |
 
-Auto starts in mono on the built-in speaker and follows the wired headphone
-jack for stereo. Changing the output mode keeps the current playback position.
+Auto mixes to mono on the built-in speaker and follows the wired headphone
+jack for stereo. It also follows the active Bluetooth or other external audio
+output. Changing the output mode keeps the current playback position.
 Playback settings and favorites are stored under
 `~/.local/share/cardputer-mdx/` by default.
 
@@ -47,7 +48,7 @@ sudo apt install build-essential binutils dpkg
 sh ./build-deb.sh
 ```
 
-The package is written to `dist/cardputer-mdx_0.2.0-1_arm64.deb`. Pass a
+The package is written to `dist/cardputer-mdx_0.2.1-1_arm64.deb`. Pass a
 directory as the first argument to change the output location. Set
 `SOURCE_DATE_EPOCH` to the release commit timestamp to fix package timestamps.
 The build uses only the source in this tree and the installed system tools.

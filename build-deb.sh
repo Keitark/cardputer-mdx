@@ -5,7 +5,7 @@ umask 022
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 destination=${1:-"$root/dist"}
 package=cardputer-mdx
-version=0.2.0-1
+version=0.2.1-1
 maintainer='Keitark <33802890+Keitark@users.noreply.github.com>'
 
 if [ "$(dpkg --print-architecture)" != arm64 ]; then
@@ -66,7 +66,7 @@ Depends: libc6 (>= $libc_version), python3 (>= 3.10), python3-numpy, python3-pil
 Homepage: https://github.com/Keitark/cardputer-mdx
 Description: X68000 MDX/PDX music player for CardputerZero
  Browse a local MDX/PDX library with FM and PCM part meters, a note spectrum,
- favorites, and automatic mono speaker and stereo headphone playback.
+ favorites, and automatic mono or stereo playback for the active audio output.
 EOF
 
 artifact="$destination/${package}_${version}_arm64.deb"

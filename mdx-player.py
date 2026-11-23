@@ -2,6 +2,7 @@
 """X68000 MDX/PDX library player for the CardputerZero LCD."""
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import fcntl
 from functools import lru_cache
 import json
@@ -48,6 +49,8 @@ HEADPHONE_JACK = Path("/dev/input/by-path/platform-sound-event")
 EVIOCGSW = 0x8004451B  # EVIOCGSW(4)
 SW_HEADPHONE_INSERT = 2
 JACK_POLL_SECONDS = 0.25
+ROUTE_POLL_SECONDS = 1.0
+BUILTIN_SINK_PREFIX = "alsa_output.platform-sound."
 SINK = "@DEFAULT_AUDIO_SINK@"
 MEDIA_KEYS = {KEY_A: KEY_MUTE, KEY_S: KEY_VOLUMEDOWN, KEY_D: KEY_VOLUMEUP,
               KEY_Q: KEY_PLAYPAUSE, KEY_SPACE: KEY_PLAYPAUSE,
@@ -146,6 +149,51 @@ def headphones_connected():
     return bool(switches[0] & (1 << SW_HEADPHONE_INSERT))
 
 
+def pulse_output(pid):
+    def pactl(*args):
+        return subprocess.run(["/usr/bin/pactl", *args], env=SESSION_ENV, text=True,
+                              capture_output=True, check=True, timeout=0.35).stdout
+
+    try:
+        if pid is not None:
+            devices = json.loads(pactl("--format=json", "list"))
+            stream = next((item for item in devices["sink_inputs"]
+                           if item["properties"].get("application.process.id") == str(pid)), None)
+            if stream is not None:
+                sink = next((item for item in devices["sinks"]
+                             if item["index"] == stream["sink"]), None)
+                if sink is None:
+                    return None
+                return sink["name"], sink.get("channel_map", "")
+        default = pactl("get-default-sink").strip()
+        return (default, "") if default else None
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        return None
+
+
+class AudioRoute:
+    def __init__(self):
+        self.worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="audio-route")
+        self.query = None
+        self.query_pid = None
+        self.poll_at = 0.0
+        self.output = None
+
+    def update(self, now, pid):
+        if self.query is not None and self.query.done():
+            if self.query_pid == pid:
+                self.output = self.query.result() or self.output
+            self.query = None
+        if self.query is None and (now >= self.poll_at or self.query_pid != pid):
+            self.query_pid = pid
+            self.query = self.worker.submit(pulse_output, pid)
+            self.poll_at = now + ROUTE_POLL_SECONDS
+        return self.output
+
+    def close(self):
+        self.worker.shutdown(wait=False, cancel_futures=True)
+
+
 class Playback:
     def __init__(self):
         self.decoder = None
@@ -154,7 +202,9 @@ class Playback:
         self.mix_pending = False
         self.audio_mode = "AUTO"
         self.mono = True
+        self.audio_route = AudioRoute()
         self.jack_poll_at = 0.0
+        self.wired_headphones = False
         self.duration_probe = None
         self.duration_deadline = 0.0
         self.title = "Open the filer with Tab"
@@ -176,15 +226,20 @@ class Playback:
         index = AUDIO_MODES.index(self.audio_mode)
         self.audio_mode = AUDIO_MODES[(index + 1) % len(AUDIO_MODES)]
         self.jack_poll_at = 0.0
+        self.audio_route.poll_at = 0.0
         self.update_audio_mode(now)
 
     def update_audio_mode(self, now):
         if self.audio_mode == "AUTO":
-            if now >= self.jack_poll_at:
-                self.jack_poll_at = now + JACK_POLL_SECONDS
-                mono = not headphones_connected()
+            pid = self.audio.pid if self.audio is not None else None
+            name, channels = self.audio_route.update(now, pid) or ("", "")
+            if name and not name.startswith(BUILTIN_SINK_PREFIX):
+                mono = bool(channels) and "," not in channels
             else:
-                mono = self.mono
+                if now >= self.jack_poll_at:
+                    self.jack_poll_at = now + JACK_POLL_SECONDS
+                    self.wired_headphones = headphones_connected()
+                mono = not self.wired_headphones
         else:
             mono = self.audio_mode == "MONO"
         if mono != self.mono:
@@ -775,7 +830,10 @@ def run(duration, play):
                     draw_lcd(lcd, render(filer, playback, mode, volume, offset, exit_progress))
                     last_frame = frame
     finally:
-        playback.stop()
+        try:
+            playback.stop()
+        finally:
+            playback.audio_route.close()
 
 
 def make_icon(path):
