@@ -751,16 +751,37 @@ def paint_exit_dialog(image, progress):
         draw.rectangle((60, 100, 59 + 2 * progress, 105), fill=LILAC)
 
 
+@lru_cache(maxsize=2)
+def _key_hint_layout(filer_active):
+    if filer_active:
+        groups = (("Tab", "Close"), ("F/X", "Move"), ("V", "Fav"), ("B", "List"),
+                  ("Z", "Back"), ("Esc", "Close"))
+    else:
+        groups = (("Tab", "Filer"), ("Q", "Play"), ("W/E", "Skip"), ("A/S/D", "Vol"),
+                  ("L", "Loop"), ("M", "Mix"), ("Esc", "Hold"))
+    face = font(10, mono=True)
+    hints = []
+    x = 6
+    for key, description in groups:
+        hints.append((round(x), key, AMBER))
+        x += face.getlength(key) / TEXT_SCALE + 3
+        hints.append((round(x), description, TEXT))
+        x += face.getlength(description) / TEXT_SCALE + 4
+    return tuple(hints)
+
+
+def paint_key_hints(image, filer_active):
+    ImageDraw.Draw(image).rectangle((0, 157, 319, 169), fill=PANEL)
+    for x, text, color in _key_hint_layout(filer_active):
+        paint_text(image, (x, 167), text, 10, color, mono=True, anchor="ls")
+
+
 def render(filer, playback, mode, volume, offset, exit_progress=None):
     image = Image.new("RGB", (320, 170), BG)
     paint_player(image, playback, mode, volume, playback.track in filer.favorites, offset)
     if filer.active:
         paint_filer(image, filer)
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((0, 157, 319, 169), fill=PANEL)
-    hint = ("F/X Move  V Fav  B List  Z Back  ESC Close" if filer.active else
-            "Q Play W/E Skip A/S/D Vol Tab L Mode M Audio Hold Esc")
-    paint_text(image, (8, 158), hint, 9, LILAC, mono=True)
+    paint_key_hints(image, filer.active)
     if exit_progress is not None:
         paint_exit_dialog(image, exit_progress)
     return image
