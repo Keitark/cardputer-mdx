@@ -10,7 +10,7 @@ PDX sample mixing, and software YM2151 synthesis at 44.1 kHz stereo.
 
 1. Download the Arm64 Debian package from the release and copy it to your
    CardputerZero.
-2. Run `sudo apt install ./cardputer-mdx_0.2.2-1_arm64.deb` on the device.
+2. Run `sudo apt install ./cardputer-mdx_0.2.3-1_arm64.deb` on the device.
 3. Put your MDX files in `~/Music/MDX Library`. You can organize them in
    subfolders. Keep each PDX sample bank in the same folder as the tracks
    that use it.
@@ -51,7 +51,7 @@ sudo apt install build-essential binutils dpkg
 sh ./build-deb.sh
 ```
 
-The package is written to `dist/cardputer-mdx_0.2.2-1_arm64.deb`. Pass a
+The package is written to `dist/cardputer-mdx_0.2.3-1_arm64.deb`. Pass a
 directory as the first argument to change the output location. Set
 `SOURCE_DATE_EPOCH` to the release commit timestamp to fix package timestamps.
 The build uses only the source in this tree and the installed system tools.
