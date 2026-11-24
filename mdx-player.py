@@ -758,7 +758,7 @@ def _key_hint_layout(filer_active):
                   ("Z", "Back"), ("Esc", "Close"))
     else:
         groups = (("Tab", "Filer"), ("Q", "Play"), ("W/E", "Skip"), ("A/S/D", "Vol"),
-                  ("L", "Loop"), ("M", "Mix"), ("Esc", "Hold"))
+                  ("L", "Loop"), ("M", "Mix"), ("Esc", "Exit"))
     face = font(10, mono=True)
     hints = []
     x = 6
