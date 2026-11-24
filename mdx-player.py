@@ -14,6 +14,7 @@ import signal
 import subprocess
 import tempfile
 import time
+from typing import NamedTuple
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -58,9 +59,7 @@ MEDIA_KEYS = {KEY_A: KEY_MUTE, KEY_S: KEY_VOLUMEDOWN, KEY_D: KEY_VOLUMEUP,
               KEY_W: KEY_PREVIOUSSONG, KEY_E: KEY_NEXTSONG}
 PLAY_PAUSE_KEYS = {KEY_PLAYPAUSE: None, KEY_PLAY: False, KEY_PLAYCD: False,
                    KEY_PAUSE: True, KEY_PAUSECD: True}
-VOLUME_KEYS = {KEY_VOLUMEDOWN: ("set-volume", "-l", "1.0", SINK, "5%-"),
-               KEY_VOLUMEUP: ("set-volume", "-l", "1.0", SINK, "5%+"),
-               KEY_MUTE: ("set-mute", SINK, "toggle")}
+VOLUME_STEPS = {KEY_VOLUMEDOWN: "5%-", KEY_VOLUMEUP: "5%+"}
 TITLE_WIDTH, TITLE_HEIGHT, SCROLL_RATE, SCROLL_HOLD_MS = 302, 13, 28, 1400
 TEXT_SCALE = 3
 PLOT_STEPS = 28
@@ -128,15 +127,15 @@ def decode_text(data):
 
 def audio_command(*args):
     try:
-        return subprocess.run(["/usr/bin/wpctl", *args], env=SESSION_ENV, text=True,
+        return subprocess.run(["/usr/bin/wpctl", *args], env={**SESSION_ENV, "LC_ALL": "C"}, text=True,
                               capture_output=True, check=True, timeout=0.75).stdout
     except (OSError, subprocess.SubprocessError):
         return ""
 
 
-def read_system_volume():
+def read_system_volume(target=SINK):
     reading = re.search(r"Volume:\s*(\d+(?:\.\d+)?)(?:\s+(\[MUTED\]))?",
-                        audio_command("get-volume", SINK))
+                        audio_command("get-volume", target))
     if not reading:
         return None, False
     return round(float(reading[1]) * 100), bool(reading[2])
@@ -150,6 +149,12 @@ def headphones_connected():
     except OSError:
         return False
     return bool(switches[0] & (1 << SW_HEADPHONE_INSERT))
+
+
+class AudioOutput(NamedTuple):
+    name: str
+    channels: str = ""
+    target: str = SINK
 
 
 def pulse_output(pid):
@@ -167,11 +172,18 @@ def pulse_output(pid):
                              if item["index"] == stream["sink"]), None)
                 if sink is None:
                     return None
-                return sink["name"], sink.get("channel_map", "")
+                node_id = str(sink.get("properties", {}).get("object.id", ""))
+                return AudioOutput(sink["name"], sink.get("channel_map", ""),
+                                   node_id if node_id.isdecimal() else SINK)
         default = pactl("get-default-sink").strip()
-        return (default, "") if default else None
+        return AudioOutput(default) if default else None
     except (OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
         return None
+
+
+def audio_output_state(pid):
+    output = pulse_output(pid)
+    return output, read_system_volume(output.target) if output else None
 
 
 class AudioRoute:
@@ -181,17 +193,39 @@ class AudioRoute:
         self.query_pid = None
         self.poll_at = 0.0
         self.output = None
+        self.output_pid = None
+        self.volume = None
 
     def update(self, now, pid):
         if self.query is not None and self.query.done():
             if self.query_pid == pid:
-                self.output = self.query.result() or self.output
+                output, volume = self.query.result()
+                if output is not None:
+                    self.output = output
+                    self.output_pid = pid
+                if volume is not None and volume[0] is not None:
+                    self.volume = volume
             self.query = None
         if self.query is None and (now >= self.poll_at or self.query_pid != pid):
             self.query_pid = pid
-            self.query = self.worker.submit(pulse_output, pid)
+            self.query = self.worker.submit(audio_output_state, pid)
             self.poll_at = now + ROUTE_POLL_SECONDS
         return self.output
+
+    def change_volume(self, key, pid):
+        target = self.output.target if self.output and self.output_pid == pid else SINK
+        if key == KEY_MUTE:
+            audio_command("set-mute", target, "toggle")
+        else:
+            audio_command("set-volume", "-l", "1.0", target, VOLUME_STEPS[key])
+        current = read_system_volume(target)
+        if current[0] is not None:
+            self.volume = current
+        if self.query is not None:
+            self.query.cancel()
+            self.query = None
+        self.poll_at = 0.0
+        return current
 
     def close(self):
         self.worker.shutdown(wait=False, cancel_futures=True)
@@ -233,11 +267,11 @@ class Playback:
         self.update_audio_mode(now)
 
     def update_audio_mode(self, now):
+        pid = self.audio.pid if self.audio is not None else None
+        output = self.audio_route.update(now, pid)
         if self.audio_mode == "AUTO":
-            pid = self.audio.pid if self.audio is not None else None
-            name, channels = self.audio_route.update(now, pid) or ("", "")
-            if name and not name.startswith(BUILTIN_SINK_PREFIX):
-                mono = bool(channels) and "," not in channels
+            if output and not output.name.startswith(BUILTIN_SINK_PREFIX):
+                mono = bool(output.channels) and "," not in output.channels
             else:
                 if now >= self.jack_poll_at:
                     self.jack_poll_at = now + JACK_POLL_SECONDS
@@ -764,10 +798,12 @@ def run(duration, play):
                         filer.release_move(key)
                     elif key in (KEY_TAB, KEY_B):
                         filer.toggle(show_favorites=key == KEY_B)
-                    elif key in VOLUME_KEYS:
-                        audio_command(*VOLUME_KEYS[key])
-                        level, muted = read_system_volume()
-                        if key != KEY_MUTE:
+                    elif key == KEY_MUTE or key in VOLUME_STEPS:
+                        pid = playback.audio.pid if playback.audio is not None else None
+                        adjusted_level, adjusted_muted = playback.audio_route.change_volume(key, pid)
+                        if adjusted_level is not None:
+                            level, muted = adjusted_level, adjusted_muted
+                        if key != KEY_MUTE and adjusted_level is not None:
                             save_player_settings(level, PLAY_MODES[mode_index])
                     elif key in PLAY_PAUSE_KEYS:
                         pause = PLAY_PAUSE_KEYS[key]
@@ -810,6 +846,8 @@ def run(duration, play):
                 exit_progress = None if esc_elapsed is None else int(esc_elapsed * 100 / ESC_HOLD_SECONDS)
                 filer.repeat(now)
                 playback.update_audio_mode(now)
+                if playback.audio_route.volume is not None:
+                    level, muted = playback.audio_route.volume
                 previous_status = playback.status
                 playback.update()
                 mode = PLAY_MODES[mode_index]
