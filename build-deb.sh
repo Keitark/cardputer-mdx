@@ -5,7 +5,7 @@ umask 022
 root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 destination=${1:-"$root/dist"}
 package=cardputer-mdx
-version=0.2.3-1
+version=0.2.4-1
 maintainer='Keitark <33802890+Keitark@users.noreply.github.com>'
 
 if [ "$(dpkg --print-architecture)" != arm64 ]; then
