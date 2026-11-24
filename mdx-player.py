@@ -19,9 +19,10 @@ from PIL import Image, ImageDraw, ImageFont
 
 from cardputer_display import (
     KEY_A, KEY_B, KEY_C, KEY_D, KEY_DOWN, KEY_E, KEY_ENTER, KEY_ESC, KEY_F, KEY_L, KEY_LEFT,
-    KEY_MUTE, KEY_NEXTSONG, KEY_PAGEDOWN, KEY_PAGEUP, KEY_PLAYPAUSE, KEY_PREVIOUSSONG,
+    KEY_MUTE, KEY_NEXTSONG, KEY_PAGEDOWN, KEY_PAGEUP, KEY_PAUSE, KEY_PAUSECD, KEY_PLAY,
+    KEY_PLAYCD, KEY_PLAYPAUSE, KEY_PREVIOUSSONG,
     KEY_Q, KEY_RIGHT, KEY_S, KEY_SPACE, KEY_TAB, KEY_UP, KEY_V, KEY_VOLUMEDOWN, KEY_VOLUMEUP,
-    KEY_W, KEY_X, KEY_Z, draw_lcd,
+    KEY_W, KEY_X, KEY_Z, BluetoothMediaInput, draw_lcd,
     lcd_and_keyboard, read_key_events,
 )
 
@@ -55,6 +56,8 @@ SINK = "@DEFAULT_AUDIO_SINK@"
 MEDIA_KEYS = {KEY_A: KEY_MUTE, KEY_S: KEY_VOLUMEDOWN, KEY_D: KEY_VOLUMEUP,
               KEY_Q: KEY_PLAYPAUSE, KEY_SPACE: KEY_PLAYPAUSE,
               KEY_W: KEY_PREVIOUSSONG, KEY_E: KEY_NEXTSONG}
+PLAY_PAUSE_KEYS = {KEY_PLAYPAUSE: None, KEY_PLAY: False, KEY_PLAYCD: False,
+                   KEY_PAUSE: True, KEY_PAUSECD: True}
 VOLUME_KEYS = {KEY_VOLUMEDOWN: ("set-volume", "-l", "1.0", SINK, "5%-"),
                KEY_VOLUMEUP: ("set-volume", "-l", "1.0", SINK, "5%+"),
                KEY_MUTE: ("set-mute", SINK, "toggle")}
@@ -317,16 +320,20 @@ class Playback:
             self.duration_ms = None
         self.pending = b""
 
-    def play_pause(self):
+    def play_pause(self, *, pause=None):
         if not self.audio or self.audio.poll() is not None:
-            if self.track is not None:
+            if pause is not True and self.track is not None:
                 self.start(self.track)
             return
         paused = self.status == "PAUSED"
+        if pause is None:
+            pause = not paused
+        if pause == paused:
+            return
         for process in (self.decoder, self.audio):
             if process and process.poll() is None:
-                process.send_signal(signal.SIGCONT if paused else signal.SIGSTOP)
-        self.status = "PLAY" if paused else "PAUSED"
+                process.send_signal(signal.SIGSTOP if pause else signal.SIGCONT)
+        self.status = "PAUSED" if pause else "PLAY"
 
     def update_duration(self):
         probe = self.duration_probe
@@ -735,11 +742,11 @@ def run(duration, play):
     last_frame = None
     esc_started = None
     try:
-        with lcd_and_keyboard() as (lcd, keyboard):
+        with lcd_and_keyboard() as (lcd, keyboard), BluetoothMediaInput() as bluetooth:
             if play:
                 playback.start(play.resolve())
             while not duration or time.monotonic() - started < duration:
-                for key, pressed in read_key_events(keyboard, 0.045):
+                for key, pressed in read_key_events(keyboard, 0.045, bluetooth=bluetooth):
                     key = MEDIA_KEYS.get(key, key)
                     if key == KEY_ESC:
                         now = time.monotonic()
@@ -762,13 +769,14 @@ def run(duration, play):
                         level, muted = read_system_volume()
                         if key != KEY_MUTE:
                             save_player_settings(level, PLAY_MODES[mode_index])
-                    elif key == KEY_PLAYPAUSE:
+                    elif key in PLAY_PAUSE_KEYS:
+                        pause = PLAY_PAUSE_KEYS[key]
                         if playback.track is not None:
-                            playback.play_pause()
-                        elif filer.active and filer.selected and filer.selected.is_file():
+                            playback.play_pause(pause=pause)
+                        elif pause is not True and filer.active and filer.selected and filer.selected.is_file():
                             playback.start(filer.selected)
                             filer.close()
-                        elif not filer.active:
+                        elif pause is not True and not filer.active:
                             filer.toggle(False)
                     elif key == KEY_L:
                         mode_index = (mode_index + 1) % len(PLAY_MODES)
